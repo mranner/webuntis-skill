@@ -51,3 +51,7 @@ Alle Befehle und Optionen stehen in der [SKILL.md](SKILL.md).
 Welche Bereiche funktionieren, legt jede Schule selbst fest. Antwortet ein
 Endpunkt mit 403 oder 500, ist er dort für Eltern gesperrt oder nicht aktiv.
 Das ist kein Fehler im Skill.
+
+## Lizenz
+
+BSD 2-Clause, siehe [LICENSE](LICENSE).
