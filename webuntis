@@ -593,6 +593,60 @@ def cmd_absences(args, client):
                   f"\t{a.get('excuseStatus')}")
 
 
+def cmd_officehours(args, client):
+    client.sicherstellen()
+    klasse_id = -1
+    if args.klasse:
+        klassen = client.hole_json("/api/public/officehours/classes",
+                                   zweck="Sprechstunden-Klassen")["data"]
+        treffer = [k for k in klassen if str(k["id"]) == str(args.klasse)
+                   or k["label"].lower() == args.klasse.lower()]
+        if not treffer:
+            namen = ", ".join(k["label"] for k in klassen)
+            raise Fehler(f"Keine Klasse '{args.klasse}'. Verfuegbar: {namen}")
+        klasse_id = treffer[0]["id"]
+
+    von = datum(args.date)
+    bis = von + timedelta(weeks=args.weeks) - timedelta(days=1)
+    # Eine Abfrage liefert die Woche ab date (teils etwas mehr) -- Woche fuer
+    # Woche holen und doppelte Termine zusammenfassen
+    termine, montag = {}, von - timedelta(days=von.weekday())
+    while montag <= bis:
+        for t in client.hole_json(
+            f"/api/public/officehours/hours?date={montag:%Y%m%d}&klasseId={klasse_id}",
+            zweck="Sprechstunden",
+        )["data"]:
+            termine[(t["teacherId"], t["date"], t.get("startTime"))] = t
+        montag += timedelta(days=7)
+
+    liste = [t for t in termine.values()
+             if t["date"] == 0 or von <= datetime.strptime(str(t["date"]), "%Y%m%d").date() <= bis]
+    if args.teacher:
+        such = args.teacher.lower()
+        liste = [t for t in liste if such in (t.get("teacher") or "").lower()]
+    liste.sort(key=lambda t: (t["date"] == 0, t["date"], t.get("uStartTime") or 0,
+                              t.get("teacher") or ""))
+    if ausgabe(liste, args.json):
+        return
+    if not liste:
+        print(f"Keine Sprechstunden zwischen {von} und {bis}.")
+        return
+    for t in liste:
+        if t["date"] == 0:
+            wann = "nach Vereinbarung"
+        else:
+            tag = datetime.strptime(str(t["date"]), "%Y%m%d").date()
+            wann = f"{WOCHENTAG[tag.weekday()]} {tag:%d.%m.} {t['startTime']}-{t['endTime']}"
+        zeile = f"{wann:<22}  {t.get('teacher')}"
+        if t.get("rooms"):
+            zeile += f"  Raum {t['rooms']}"
+        if t.get("registered"):
+            zeile += "  [angemeldet]"
+        elif t["date"] and not t.get("available"):
+            zeile += "  [nicht verfuegbar]"
+        print(zeile)
+
+
 def cmd_messages(args, client):
     client.sicherstellen()
     if args.msg_cmd == "list":
@@ -717,6 +771,14 @@ def parser_bauen():
     a.add_argument("--date")
     a.add_argument("--days", type=int, default=30)
 
+    o = sub.add_parser("officehours", parents=[gemeinsam],
+                       help="Sprechstunden der Lehrkraefte")
+    o.add_argument("--class", dest="klasse",
+                   help="nur Lehrkraefte dieser Klasse, z.B. 2a")
+    o.add_argument("--teacher", help="Teil des Namens oder Kuerzels")
+    o.add_argument("--date")
+    o.add_argument("--weeks", type=int, default=1)
+
     m = sub.add_parser("messages", parents=[gemeinsam],
                        help="Mitteilungs-Center")
     msub = m.add_subparsers(dest="msg_cmd", required=True)
@@ -748,7 +810,7 @@ def main():
          "classes": cmd_classes,
          "timetable": cmd_timetable, "news": cmd_news,
          "homework": cmd_homework, "absences": cmd_absences,
-         "messages": cmd_messages}[args.cmd](args, client)
+         "officehours": cmd_officehours, "messages": cmd_messages}[args.cmd](args, client)
         return 0
     except Fehler as err:
         print(f"Fehler: {err}", file=sys.stderr)

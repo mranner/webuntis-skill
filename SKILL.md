@@ -2,11 +2,12 @@
 name: webuntis
 description: >
   WebUntis für Erziehungsberechtigte: Stundenplan der Kinder, Tagesnachrichten
-  der Schule, Hausaufgaben, Abwesenheiten und das Mitteilungs-Center
-  (Posteingang lesen, an Lehrkräfte schreiben). Läuft headless über die
-  REST-API, Passwort aus dem macOS-Schlüsselbund - kein Browser nötig.
-  Auch bei "was hat mein Kind morgen", "Stundenplan diese Woche", "gibt es neue
-  Nachrichten in WebUntis", "schreib der Lehrerin", "fällt eine Stunde aus".
+  der Schule, Hausaufgaben, Abwesenheiten, Sprechstunden der Lehrkräfte und
+  das Mitteilungs-Center (Posteingang lesen, an Lehrkräfte schreiben). Läuft
+  headless über die REST-API, Passwort aus dem macOS-Schlüsselbund - kein
+  Browser nötig. Auch bei "was hat mein Kind morgen", "Stundenplan diese
+  Woche", "gibt es neue Nachrichten in WebUntis", "schreib der Lehrerin",
+  "fällt eine Stunde aus", "wann hat die Lehrerin Sprechstunde".
   Trigger: /webuntis.
 ---
 
@@ -76,6 +77,7 @@ Passwort auf dem Terminal abfragt.
 | `news` | Tagesnachrichten der Schule (`--date`) |
 | `homework` | Hausaufgaben (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
 | `absences` | Abwesenheiten (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
+| `officehours` | Sprechstunden der Lehrkräfte (`--class`, `--teacher`, `--date`, `--weeks`) |
 | `messages list` | Posteingang, Gesendet oder Entwürfe (`--folder`) |
 | `messages read <id>` | Eine Mitteilung im Volltext |
 | `messages recipients` | Mögliche Empfänger mit userId |
@@ -105,6 +107,8 @@ python3 "$SKILL_DIR/webuntis" timetable --class 2a --days 5
 python3 "$SKILL_DIR/webuntis" news --date heute
 python3 "$SKILL_DIR/webuntis" homework --student Ben --date heute --days 3
 python3 "$SKILL_DIR/webuntis" absences --student Ben --date 2026-09-14 --days 90
+python3 "$SKILL_DIR/webuntis" officehours --class 2a --weeks 2
+python3 "$SKILL_DIR/webuntis" officehours --teacher MUS --date morgen
 python3 "$SKILL_DIR/webuntis" messages list --folder inbox --limit 10
 python3 "$SKILL_DIR/webuntis" messages read 12345
 ```
@@ -178,7 +182,7 @@ andere Bereiche frei:
 | Mitteilungen senden (Skript) | v2 seit 18.09.2026, scharf gelaufen seit November 2026, siehe unten |
 | Hausaufgaben | Endpunkt antwortet, war leer |
 | Abwesenheiten | funktioniert, nur je Kind mit `studentId` (ohne: HTTP 500) |
-| Sprechstunden | lesbar, Anmeldung laut Einstellungen erlaubt -- im Script noch nicht, siehe unten |
+| Sprechstunden | funktioniert (`officehours`); Anmeldung laut Einstellungen erlaubt, im Script noch nicht |
 | Prüfungen | HTTP 403 -- für Eltern gesperrt |
 
 Bei 403/500 meldet das Script das im Klartext. Oft ist das eine
@@ -255,29 +259,42 @@ Abwesenheiten auch melden und entschuldigen (`canReportAbsence`,
 `canExcuse`) -- diese schreibenden Requests sind nicht aufgezeichnet und im
 Script nicht nachgebaut.
 
-### Sprechstunden (noch nicht im Script)
+### Sprechstunden
 
-Aus einer Aufzeichnung der Weboberfläche (13.11.2026), alle mit der
-Cookie-Session:
+Alle mit der Cookie-Session:
 
 | Endpunkt | Inhalt |
 |---|---|
 | `GET /api/public/officehours/classes` | Klassen mit `id` und `label` |
-| `GET /api/public/officehours/hours?date=YYYYMMDD&klasseId=<id>` | Sprechstunden der Woche ab `date`: Lehrkraft, Tag, Zeit, Raum, `available`, `registered`; `klasseId=-1` für alle |
+| `GET /api/public/officehours/hours?date=YYYYMMDD&klasseId=<id>` | Sprechstunden ab `date`, etwa eine Woche: Lehrkraft, Tag, Zeit, Raum, `available`, `registered`; `klasseId=-1` für alle |
 | `GET /api/public/officehours/registrations` | eigene Anmeldungen |
 | `GET /api/public/officehours/settings` | u.a. `allowRegistration`, `noAppointmentMsg` |
 
+`officehours` fragt Woche für Woche ab und fasst Doppelte zusammen. Einträge
+mit `date: 0` haben keinen festen Termin und erscheinen als "nach
+Vereinbarung". `--class` beschränkt auf die Lehrkräfte einer Klasse.
 Die Anmeldung selbst (vermutlich ein `POST`) ist nicht aufgezeichnet.
 
-### Neues Stundenplan-API
+### Neues Stundenplan-API -- geprüft, nicht übernommen
 
 Die Weboberfläche lädt den Stundenplan inzwischen über
 `GET /api/rest/view/v1/timetable/entries?start=YYYY-MM-DD&end=YYYY-MM-DD&format=1&resourceType=STUDENT&resources=<id>&timetableType=MY_TIMETABLE&layout=START_TIME`
-(Klasse: `resourceType=CLASS`, `timetableType=STANDARD`). Die Antwort ist
-reichhaltiger als `public/timetable/weekly/data`, das `timetable` noch nutzt:
-`gridEntries` mit `status`, `notesAll` (Notizen der Lehrkraft), Lehrkraft und
-Raum mit Kurz- und Langnamen. Das alte API funktioniert weiter, ist aber der
-wahrscheinlichste Kandidat für eine Abschaltung.
+(Bearer-Token nötig; Klasse: `resourceType=CLASS`, `timetableType=STANDARD`).
+
+Am 13.11.2026 für zwei Kinder über ein ganzes Semester (rund 800 Stunden)
+gegen `public/timetable/weekly/data` verglichen, das `timetable` nutzt:
+
+- **Eine Stunde fehlte** im neuen API, das alte lieferte sie.
+- **`FREE` und `CANCEL`** landen beide auf `status: CANCELLED` -- "frei" und
+  "Entfall" sind nicht mehr unterscheidbar.
+- Gleichwertig: Zeiten, Fach, Lehrkraft, Raum, Prüfungen (`type: EXAM`,
+  Art in `lessonInfo`), Notizen (`notesAll` = alt `periodText`), Vertretung
+  und Raumwechsel (`removed` = alt `orgId`), verlegt (`moved`).
+- Zusätzlich nur Langnamen (Fach "Mathematik", Raum "Musiksaal") und
+  zusammengefasste Doppelstunden.
+
+Daher bleibt `timetable` beim alten API. Erst umstellen, wenn das alte
+abgeschaltet wird -- dann die beiden Lücken oben berücksichtigen.
 
 ## Grenzen
 
