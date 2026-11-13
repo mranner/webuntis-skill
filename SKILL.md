@@ -77,7 +77,7 @@ Passwort auf dem Terminal abfragt.
 | `news` | Tagesnachrichten der Schule (`--date`) |
 | `homework` | Hausaufgaben (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
 | `absences` | Abwesenheiten (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
-| `officehours` | Sprechstunden der Lehrkräfte (`--class`, `--teacher`, `--date`, `--weeks`) |
+| `officehours` | Sprechstunden der Lehrkräfte (`--class`, `--teacher`, `--date`, `--weeks`); mit `--class` samt Fächern in der Klasse |
 | `messages list` | Posteingang, Gesendet oder Entwürfe (`--folder`) |
 | `messages read <id>` | Eine Mitteilung im Volltext |
 | `messages recipients` | Mögliche Empfänger mit userId |
@@ -272,7 +272,11 @@ Alle mit der Cookie-Session:
 
 `officehours` fragt Woche für Woche ab und fasst Doppelte zusammen. Einträge
 mit `date: 0` haben keinen festen Termin und erscheinen als "nach
-Vereinbarung". `--class` beschränkt auf die Lehrkräfte einer Klasse.
+Vereinbarung". `--class` beschränkt auf die Lehrkräfte einer Klasse und
+hängt ihre Fächer in dieser Klasse an: aus dem Klassenplan (mindestens zwei
+Wochen, wegen 14-tägiger Fächer), verknüpft über das Kürzel in
+"NAME, Vorname (KZ)"; mit `--json` im Feld `subjects`. Der Klassenplan
+enthält alle Gruppen -- nicht jede Lehrkraft unterrichtet jedes Kind.
 Die Anmeldung selbst (vermutlich ein `POST`) ist nicht aufgezeichnet.
 
 ### Neues Stundenplan-API -- geprüft, nicht übernommen

@@ -12,6 +12,7 @@ import getpass
 import http.cookiejar
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -626,6 +627,23 @@ def cmd_officehours(args, client):
         liste = [t for t in liste if such in (t.get("teacher") or "").lower()]
     liste.sort(key=lambda t: (t["date"] == 0, t["date"], t.get("uStartTime") or 0,
                               t.get("teacher") or ""))
+    if args.klasse:
+        # Faecher je Lehrkraft aus dem Klassenplan, mindestens zwei Wochen
+        # (14-taegige Faecher); verknuepft ueber das Kuerzel "NAME, Vorname (KZ)"
+        klasse = klasse_waehlen(client, args.klasse)
+        perioden, namen = wochenplan(client, ELEMENT_KLASSE, klasse["id"], von,
+                                     max(bis, von + timedelta(days=13)))
+        faecher = {}
+        for p in perioden:
+            lehrer = [namen.get((ELEMENT_LEHRER, e["id"])) for e in p["elements"]
+                      if e["type"] == ELEMENT_LEHRER]
+            fach = [namen.get((ELEMENT_FACH, e["id"])) for e in p["elements"]
+                    if e["type"] == ELEMENT_FACH]
+            for l in lehrer:
+                faecher.setdefault(l, set()).update(f for f in fach if f)
+        for t in liste:
+            kz = re.search(r"\(([^)]+)\)\s*$", t.get("teacher") or "")
+            t["subjects"] = sorted(faecher.get(kz.group(1), ())) if kz else []
     if ausgabe(liste, args.json):
         return
     if not liste:
@@ -638,6 +656,8 @@ def cmd_officehours(args, client):
             tag = datetime.strptime(str(t["date"]), "%Y%m%d").date()
             wann = f"{WOCHENTAG[tag.weekday()]} {tag:%d.%m.} {t['startTime']}-{t['endTime']}"
         zeile = f"{wann:<22}  {t.get('teacher')}"
+        if args.klasse:
+            zeile += f"  {', '.join(t['subjects']) or '(kein Fach)'}"
         if t.get("rooms"):
             zeile += f"  Raum {t['rooms']}"
         if t.get("registered"):
