@@ -241,5 +241,6 @@ mit der Cookie-Session aus.
 
 - Nur macOS (Schlüsselbund über `security`).
 - Der v2-Versand ist gegen den Request der Weboberfläche nachgebaut und
-  gegen einen lokalen Mock geprüft, aber noch nicht scharf gelaufen -- vor dem
-  Versand `--dry-run` zeigen und vom Nutzer bestätigen lassen.
+  läuft seit November 2026 scharf. Da Untis die Route nicht dokumentiert, kann
+  sie sich ohne Ankündigung ändern -- vor jedem Versand weiterhin `--dry-run`
+  zeigen und vom Nutzer bestätigen lassen.
