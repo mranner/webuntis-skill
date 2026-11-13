@@ -293,6 +293,24 @@ gegen `public/timetable/weekly/data` verglichen, das `timetable` nutzt:
 - Zusätzlich nur Langnamen (Fach "Mathematik", Raum "Musiksaal") und
   zusammengefasste Doppelstunden.
 
+Zuordnung `cellState` (alt) zu `type`/`status` (neu), beobachtet im selben
+Vergleich:
+
+| alt `cellState` | neu `type` | neu `status` | Merkmal |
+|---|---|---|---|
+| `STANDARD` | `NORMAL_TEACHING_PERIOD` | `REGULAR` | |
+| `CANCEL` | `NORMAL_TEACHING_PERIOD` | `CANCELLED` | teils mit `moved` |
+| `FREE` | `NORMAL_TEACHING_PERIOD` | `CANCELLED` | nicht von `CANCEL` zu trennen |
+| `SUBSTITUTION` | `NORMAL_TEACHING_PERIOD` | `CHANGED` | `removed` bei der Lehrkraft |
+| `ROOMSUBSTITUTION` | `NORMAL_TEACHING_PERIOD` | `CHANGED` | `removed` beim Raum, vereinzelt ohne `removed` |
+| `ADDITIONAL` | `ADDITIONAL_PERIOD` | `ADDITIONAL` oder `CHANGED` | |
+| `ADDITIONAL` | `EVENT` | `CHANGED` | Veranstaltung, Text in `lessonInfo` |
+| `SHIFT` | `ADDITIONAL_PERIOD` | `ADDITIONAL` | `moved` |
+| `EXAM` | `EXAM` | `REGULAR` | Art in `lessonInfo` |
+
+Eine Doppelstunde ist ein Eintrag mit mehreren `ids`; jede `id` entspricht
+einer Periode des alten API.
+
 Daher bleibt `timetable` beim alten API. Erst umstellen, wenn das alte
 abgeschaltet wird -- dann die beiden Lücken oben berücksichtigen.
 
