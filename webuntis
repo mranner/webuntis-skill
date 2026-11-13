@@ -1,0 +1,749 @@
+#!/usr/bin/env python3
+"""webuntis -- Lesezugriff auf WebUntis fuer Erziehungsberechtigte.
+
+Stdlib only (Python >= 3.11). Login ueber das Web-Formular
+(/WebUntis/j_spring_security_check), danach Cookie-Session plus
+Bearer-Token (/WebUntis/api/token/new) fuer die REST-Endpunkte.
+Passwort liegt im macOS-Schluesselbund, nie in der Konfiguration.
+"""
+
+import argparse
+import getpass
+import http.cookiejar
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import date, datetime, timedelta
+
+SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.environ.get("WEBUNTIS_CONFIG", os.path.join(SKILL_DIR, "webuntis.json"))
+STATE_DIR = os.path.expanduser("~/.cache/webuntis-skill")
+KEYCHAIN_SERVICE = "webuntis"
+USER_AGENT = "webuntis-skill/1.0 (+claude-code)"
+
+
+class Fehler(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------
+# Konfiguration und Passwort
+# --------------------------------------------------------------------------
+
+def config_laden():
+    if not os.path.exists(CONFIG_PATH):
+        raise Fehler(
+            f"Keine Konfiguration unter {CONFIG_PATH}.\n"
+            f"Anlegen mit: python3 \"{SKILL_DIR}/webuntis\" setup"
+        )
+    with open(CONFIG_PATH, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    for pflicht in ("server", "school", "username"):
+        if not cfg.get(pflicht):
+            raise Fehler(f"Feld '{pflicht}' fehlt in {CONFIG_PATH}.")
+    return cfg
+
+
+def passwort_lesen(username):
+    res = subprocess.run(
+        ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
+         "-a", username, "-w"],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        return None
+    return res.stdout.rstrip("\n")
+
+
+def passwort_anlegen(username):
+    """Legt den Keychain-Eintrag an; security fragt selbst auf dem TTY."""
+    if not sys.stdin.isatty():
+        raise Fehler(
+            "Kein Passwort im Schluesselbund und keine interaktive Shell.\n"
+            "Einmalig im Terminal ausfuehren:\n"
+            f"  security add-generic-password -U -s {KEYCHAIN_SERVICE} "
+            f"-a {username} -w"
+        )
+    print(f"Kein Schluesselbund-Eintrag fuer {username}.", file=sys.stderr)
+    print("Passwort wird jetzt abgefragt und im Schluesselbund abgelegt.",
+          file=sys.stderr)
+    res = subprocess.run(
+        ["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
+         "-a", username, "-w"]
+    )
+    if res.returncode != 0:
+        raise Fehler("Anlegen im Schluesselbund fehlgeschlagen.")
+    pw = passwort_lesen(username)
+    if not pw:
+        raise Fehler("Eintrag angelegt, aber nicht lesbar.")
+    return pw
+
+
+def passwort_holen(username):
+    return passwort_lesen(username) or passwort_anlegen(username)
+
+
+# --------------------------------------------------------------------------
+# Client
+# --------------------------------------------------------------------------
+
+class Client:
+    def __init__(self, cfg):
+        self.server = cfg["server"].rstrip("/")
+        self.school = cfg["school"]
+        self.username = cfg["username"]
+        self.base = f"https://{self.server}/WebUntis"
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        sichere = "".join(c if c.isalnum() else "_" for c in
+                          f"{self.server}-{self.username}")
+        self.cookie_path = os.path.join(STATE_DIR, f"{sichere}.cookies")
+        self.jar = http.cookiejar.LWPCookieJar(self.cookie_path)
+        if os.path.exists(self.cookie_path):
+            try:
+                self.jar.load(ignore_discard=True)
+            except Exception:
+                pass
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.jar)
+        )
+        self._token = None
+
+    # -- HTTP ---------------------------------------------------------------
+
+    def _roh(self, methode, pfad, daten=None, headers=None, content_type=None):
+        url = pfad if pfad.startswith("http") else self.base + pfad
+        kopf = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        if headers:
+            kopf.update(headers)
+        koerper = None
+        if daten is not None:
+            if content_type == "form":
+                koerper = urllib.parse.urlencode(daten).encode()
+                kopf["Content-Type"] = "application/x-www-form-urlencoded"
+            elif content_type == "multipart":
+                koerper, grenze = multipart_bauen(daten)
+                kopf["Content-Type"] = f"multipart/form-data; boundary={grenze}"
+            else:
+                koerper = json.dumps(daten).encode()
+                kopf["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=koerper, headers=kopf,
+                                     method=methode)
+        try:
+            with self.opener.open(req, timeout=30) as antwort:
+                return antwort.status, antwort.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as err:
+            return err.code, err.read().decode("utf-8", "replace")
+        except urllib.error.URLError as err:
+            raise Fehler(f"Verbindung zu {self.server} fehlgeschlagen: {err.reason}")
+
+    def _speichern(self):
+        self.jar.save(ignore_discard=True)
+        os.chmod(self.cookie_path, 0o600)
+
+    # -- Login --------------------------------------------------------------
+
+    def login(self):
+        passwort = passwort_holen(self.username)
+        self._roh("GET", f"/?school={urllib.parse.quote(self.school)}")
+        status, text = self._roh(
+            "POST", "/j_spring_security_check",
+            daten={"school": self.school, "j_username": self.username,
+                   "j_password": passwort, "token": ""},
+            content_type="form",
+        )
+        erfolg = False
+        try:
+            erfolg = json.loads(text).get("state") == "SUCCESS"
+        except Exception:
+            erfolg = status in (200, 302) and "j_spring_security_check" not in text
+        if not erfolg:
+            raise Fehler(
+                "Login abgelehnt. Passwort im Schluesselbund pruefen:\n"
+                f"  security add-generic-password -U -s {KEYCHAIN_SERVICE} "
+                f"-a {self.username} -w"
+            )
+        self._token = None
+        self._speichern()
+
+    def _angemeldet(self):
+        status, text = self._roh("GET", "/api/app/config")
+        if status != 200:
+            return None
+        try:
+            cfg = json.loads(text)["data"]
+        except Exception:
+            return None
+        nutzer = cfg.get("loginServiceConfig", {}).get("user") or {}
+        return cfg if nutzer.get("name") else None
+
+    def sicherstellen(self):
+        cfg = self._angemeldet()
+        if cfg is None:
+            self.login()
+            cfg = self._angemeldet()
+            if cfg is None:
+                raise Fehler("Anmeldung hat keine gueltige Session ergeben.")
+        return cfg
+
+    def token(self):
+        if self._token is None:
+            status, text = self._roh("GET", "/api/token/new")
+            if status != 200 or not text.strip():
+                raise Fehler("Konnte kein Bearer-Token abrufen.")
+            self._token = text.strip()
+        return self._token
+
+    # -- API ----------------------------------------------------------------
+
+    def hole(self, pfad, bearer=False):
+        kopf = {"Authorization": "Bearer " + self.token()} if bearer else None
+        status, text = self._roh("GET", pfad, headers=kopf)
+        if status == 401 and bearer:
+            self._token = None
+            kopf = {"Authorization": "Bearer " + self.token()}
+            status, text = self._roh("GET", pfad, headers=kopf)
+        return status, text
+
+    def hole_json(self, pfad, bearer=False, zweck=""):
+        status, text = self.hole(pfad, bearer=bearer)
+        if status != 200:
+            raise Fehler(fehlertext(status, text, zweck or pfad))
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            raise Fehler(f"Unerwartete Antwort von {pfad}: {text[:200]}")
+
+    def sende_json(self, pfad, daten, bearer=True):
+        kopf = {"Authorization": "Bearer " + self.token()} if bearer else None
+        status, text = self._roh("POST", pfad, daten=daten, headers=kopf)
+        return status, text
+
+    def sende_multipart(self, pfad, daten):
+        kopf = {"Authorization": "Bearer " + self.token()}
+        status, text = self._roh("POST", pfad, daten=daten, headers=kopf,
+                                 content_type="multipart")
+        if status == 401:
+            self._token = None
+            kopf = {"Authorization": "Bearer " + self.token()}
+            status, text = self._roh("POST", pfad, daten=daten, headers=kopf,
+                                     content_type="multipart")
+        return status, text
+
+
+def multipart_bauen(daten):
+    """Ein Part `request` als JSON-Blob -- so schickt es die Weboberflaeche."""
+    grenze = "----WebUntisSkill" + uuid.uuid4().hex
+    koerper = (
+        f"--{grenze}\r\n"
+        'Content-Disposition: form-data; name="request"; filename="blob"\r\n'
+        "Content-Type: application/json\r\n\r\n"
+        + json.dumps(daten, ensure_ascii=False)
+        + f"\r\n--{grenze}--\r\n"
+    )
+    return koerper.encode("utf-8"), grenze
+
+
+def fehlertext(status, text, zweck):
+    if status == 403:
+        return (f"{zweck}: Zugriff verweigert (403). Dieser Bereich ist fuer "
+                f"Erziehungsberechtigte an dieser Schule nicht freigegeben.")
+    if status == 500:
+        return (f"{zweck}: Serverfehler (500). Der Endpunkt ist an dieser "
+                f"Schule vermutlich nicht aktiv.")
+    if status == 404:
+        return f"{zweck}: Endpunkt nicht gefunden (404)."
+    return f"{zweck}: HTTP {status} -- {text[:200]}"
+
+
+# --------------------------------------------------------------------------
+# Hilfen
+# --------------------------------------------------------------------------
+
+def datum(wert, standard=None):
+    if not wert:
+        return standard or date.today()
+    if wert == "heute":
+        return date.today()
+    if wert == "morgen":
+        return date.today() + timedelta(days=1)
+    try:
+        return datetime.strptime(wert, "%Y-%m-%d").date()
+    except ValueError:
+        raise Fehler(f"Datum '{wert}' nicht lesbar, erwartet YYYY-MM-DD.")
+
+
+def ausgabe(objekt, als_json):
+    if als_json:
+        print(json.dumps(objekt, ensure_ascii=False, indent=2))
+        return True
+    return False
+
+
+def schueler_liste(client):
+    daten = client.hole_json(
+        "/api/public/timetable/weekly/pageconfig?type=5",
+        zweck="Schuelerliste",
+    )["data"]
+    return [
+        {"id": e["id"], "name": e.get("displayname") or e.get("name"),
+         "klasse": e.get("klasseId")}
+        for e in daten.get("elements", [])
+    ]
+
+
+def schueler_waehlen(client, wunsch):
+    liste = schueler_liste(client)
+    if not liste:
+        raise Fehler("Dem Account ist kein Kind zugeordnet.")
+    if not wunsch:
+        return liste[0]
+    for s in liste:
+        if str(s["id"]) == str(wunsch) or wunsch.lower() in (s["name"] or "").lower():
+            return s
+    namen = ", ".join(f"{s['name']} ({s['id']})" for s in liste)
+    raise Fehler(f"Kein Kind passt zu '{wunsch}'. Verfuegbar: {namen}")
+
+
+# --------------------------------------------------------------------------
+# Befehle
+# --------------------------------------------------------------------------
+
+def cmd_setup(args):
+    if os.path.exists(CONFIG_PATH) and not args.force:
+        print(f"{CONFIG_PATH} existiert bereits (--force zum Ueberschreiben).")
+        cfg = config_laden()
+    else:
+        server = args.server or input("Server (z.B. schule.webuntis.com): ").strip()
+        school = args.school or input("Schulkuerzel (z.B. schule): ").strip()
+        username = args.username or input("Benutzername (E-Mail): ").strip()
+        cfg = {"server": server, "school": school, "username": username}
+        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.chmod(CONFIG_PATH, 0o600)
+        print(f"Konfiguration geschrieben: {CONFIG_PATH}")
+    passwort_holen(cfg["username"])
+    print("Passwort liegt im Schluesselbund.")
+    client = Client(cfg)
+    client.sicherstellen()
+    print("Login erfolgreich.")
+    for s in schueler_liste(client):
+        print(f"  Kind: {s['name']} (id {s['id']})")
+
+
+def cmd_whoami(args, client):
+    cfg = client.sicherstellen()
+    nutzer = cfg["loginServiceConfig"]["user"]
+    info = {
+        "server": client.server,
+        "schule": cfg.get("licence", {}).get("name"),
+        "mandant": cfg.get("mandantName"),
+        "benutzer": nutzer.get("name"),
+        "userId": nutzer.get("id"),
+        "personId": nutzer.get("personId"),
+        "kinder": schueler_liste(client),
+    }
+    if ausgabe(info, args.json):
+        return
+    print(f"{info['benutzer']} an {info['schule']} ({info['mandant']})")
+    for kind in info["kinder"]:
+        print(f"  Kind: {kind['name']} (id {kind['id']})")
+
+
+def cmd_students(args, client):
+    client.sicherstellen()
+    liste = schueler_liste(client)
+    if ausgabe(liste, args.json):
+        return
+    for s in liste:
+        print(f"{s['id']}\t{s['name']}")
+
+
+ELEMENT_KLASSE, ELEMENT_LEHRER, ELEMENT_FACH, ELEMENT_RAUM = 1, 2, 3, 4
+ELEMENT_SCHUELER = 5
+
+WOCHENTAG = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+ZELLE = {
+    "CANCEL": "ENTFALL",
+    "SUBSTITUTION": "Vertretung",
+    "ADDITIONAL": "zusaetzlich",
+    "ROOMSUBSTITUTION": "Raumwechsel",
+    "SHIFT": "verlegt",
+    "FREE": "frei",
+    "EXAM": "Pruefung",
+}
+
+
+def klassen_liste(client):
+    daten = client.hole_json(
+        "/api/public/timetable/weekly/pageconfig?type=1",
+        zweck="Klassenliste",
+    )["data"]
+    return [{"id": e["id"], "name": e.get("displayname") or e.get("name")}
+            for e in daten.get("elements", [])]
+
+
+def klasse_waehlen(client, wunsch):
+    liste = klassen_liste(client)
+    for k in liste:
+        if str(k["id"]) == str(wunsch) or (k["name"] or "").lower() == wunsch.lower():
+            return k
+    namen = ", ".join(k["name"] for k in liste)
+    raise Fehler(f"Keine Klasse '{wunsch}'. Verfuegbar: {namen}")
+
+
+def wochenplan(client, element_typ, element_id, von, bis):
+    """Holt alle Perioden zwischen von und bis, Woche fuer Woche."""
+    perioden, namen = [], {}
+    montag = von - timedelta(days=von.weekday())
+    while montag <= bis:
+        daten = client.hole_json(
+            "/api/public/timetable/weekly/data"
+            f"?elementType={element_typ}&elementId={element_id}"
+            f"&date={montag}&formatId=1",
+            zweck="Stundenplan",
+        )["data"]["result"]["data"]
+        for e in daten.get("elements", []):
+            namen[(e["type"], e["id"])] = e.get("name")
+        perioden.extend(daten.get("elementPeriods", {}).get(str(element_id), []))
+        montag += timedelta(days=7)
+    return perioden, namen
+
+
+def zeit(wert):
+    text = f"{int(wert):04d}"
+    return f"{text[:2]}:{text[2:]}"
+
+
+def periode_zeile(periode, namen):
+    def teil(typ):
+        werte = []
+        for ref in periode.get("elements", []):
+            if ref["type"] != typ:
+                continue
+            name = namen.get((typ, ref["id"]), str(ref["id"]))
+            if ref.get("orgId"):
+                alt = namen.get((typ, ref["orgId"]))
+                if alt and alt != name:
+                    name = f"{name} (statt {alt})"
+            werte.append(name)
+        return " ".join(werte)
+
+    spanne = f"{zeit(periode['startTime'])}-{zeit(periode['endTime'])}"
+    fach = teil(ELEMENT_FACH) or periode.get("lessonText") or "?"
+    lehrer = teil(ELEMENT_LEHRER)
+    raum = teil(ELEMENT_RAUM).replace("---", "").strip()
+    zustand = ZELLE.get(periode.get("cellState", ""), "")
+    # lessonText traegt bei Pruefungen die Art ("SA M"), periodText den Stundeninhalt
+    texte = []
+    for schluessel in ("lessonText", "periodText", "substText"):
+        text = (periode.get(schluessel) or "").strip()
+        if text and text != fach and text not in texte:
+            texte.append(text)
+    zusatz = " · ".join(texte)
+
+    zeile = f"{spanne}  {fach:<8}"
+    if lehrer:
+        zeile += f" {lehrer:<6}"
+    if raum:
+        zeile += f" {raum}"
+    if zustand:
+        zeile += f"  [{zustand}]"
+    if zusatz:
+        zeile += f"  {zusatz}"
+    return zeile.rstrip()
+
+
+def cmd_classes(args, client):
+    client.sicherstellen()
+    liste = klassen_liste(client)
+    if ausgabe(liste, args.json):
+        return
+    for k in liste:
+        print(f"{k['id']}\t{k['name']}")
+
+
+def cmd_timetable(args, client):
+    client.sicherstellen()
+    if args.klasse:
+        ziel = klasse_waehlen(client, args.klasse)
+        typ = ELEMENT_KLASSE
+        titel = f"Klasse {ziel['name']}"
+    else:
+        ziel = schueler_waehlen(client, args.student)
+        typ = ELEMENT_SCHUELER
+        titel = ziel["name"]
+
+    von = datum(args.date)
+    bis = von + timedelta(days=args.days - 1)
+    perioden, namen = wochenplan(client, typ, ziel["id"], von, bis)
+
+    nach_tag = {}
+    for p in perioden:
+        tag = datetime.strptime(str(p["date"]), "%Y%m%d").date()
+        if von <= tag <= bis:
+            nach_tag.setdefault(tag, []).append(p)
+
+    if args.json:
+        ausgabe({"ziel": ziel, "typ": typ,
+                 "tage": {str(t): v for t, v in sorted(nach_tag.items())},
+                 "namen": {f"{k[0]}:{k[1]}": v for k, v in namen.items()}}, True)
+        return
+
+    print(f"Stundenplan {titel} -- {von} bis {bis}")
+    if not nach_tag:
+        print("\nKeine Daten.")
+        if typ == ELEMENT_SCHUELER:
+            print("Solange die Schuelerzuordnung fehlt, hilft der Klassenplan:")
+            print("  webuntis timetable --class 2a")
+        return
+    for tag in sorted(nach_tag):
+        print(f"\n{WOCHENTAG[tag.weekday()]} {tag:%d.%m.%Y}")
+        for p in sorted(nach_tag[tag], key=lambda x: x["startTime"]):
+            print("  " + periode_zeile(p, namen))
+
+
+def cmd_news(args, client):
+    client.sicherstellen()
+    tag = datum(args.date)
+    daten = client.hole_json(
+        f"/api/public/news/newsWidgetData?date={tag:%Y%m%d}",
+        zweck="Tagesnachrichten",
+    )["data"]
+    meldungen = daten.get("messagesOfDay") or []
+    if ausgabe(meldungen, args.json):
+        return
+    if not meldungen:
+        print(f"Keine Tagesnachrichten fuer {tag}.")
+        return
+    for m in meldungen:
+        print(f"\n## {m.get('subject')}")
+        print(entschaerfen(m.get("text") or ""))
+
+
+def entschaerfen(html):
+    import re
+    text = re.sub(r"<br\s*/?>", "\n", html)
+    text = re.sub(r"</p>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    import html as html_mod
+    return html_mod.unescape(text).strip()
+
+
+def cmd_homework(args, client):
+    client.sicherstellen()
+    von = datum(args.date)
+    bis = von + timedelta(days=args.days - 1)
+    daten = client.hole_json(
+        f"/api/homeworks/lessons?startDate={von:%Y%m%d}&endDate={bis:%Y%m%d}",
+        zweck="Hausaufgaben",
+    )["data"]
+    kinder = {s["id"]: s["name"] for s in schueler_liste(client)}
+    zuordnung = {r["homeworkId"]: r.get("elementIds") or []
+                 for r in daten.get("records") or []}
+    if args.student:
+        kind = schueler_waehlen(client, args.student)
+        daten["homeworks"] = [h for h in daten.get("homeworks") or []
+                              if kind["id"] in zuordnung.get(h["id"], [])]
+        daten["records"] = [r for r in daten.get("records") or []
+                            if kind["id"] in (r.get("elementIds") or [])]
+    aufgaben = daten.get("homeworks") or []
+    if ausgabe(daten, args.json):
+        return
+    if not aufgaben:
+        print(f"Keine Hausaufgaben zwischen {von} und {bis}.")
+        return
+    faecher = {l["id"]: l.get("subject") for l in daten.get("lessons", [])}
+    for h in aufgaben:
+        fach = faecher.get(h.get("lessonId"), "?")
+        wer = ", ".join(kinder.get(i, str(i)) for i in zuordnung.get(h["id"], [])) or "?"
+        print(f"{h.get('dueDate')}\t{wer}\t{fach}\t{h.get('text')}")
+
+
+def cmd_absences(args, client):
+    client.sicherstellen()
+    von = datum(args.date, date.today() - timedelta(days=30))
+    bis = von + timedelta(days=args.days - 1)
+    daten = client.hole_json(
+        "/api/classreg/absences/students"
+        f"?startDate={von:%Y%m%d}&endDate={bis:%Y%m%d}"
+        "&excuseStatusId=-1&includeTodaysAbsence=true",
+        zweck="Abwesenheiten",
+    )["data"]
+    if ausgabe(daten, args.json):
+        return
+    for a in daten.get("absences") or []:
+        print(f"{a.get('startDate')}\t{a.get('reason')}\t{a.get('excuseStatus')}")
+
+
+def cmd_messages(args, client):
+    client.sicherstellen()
+    if args.msg_cmd == "list":
+        pfad = {"inbox": "/api/rest/view/v1/messages",
+                "sent": "/api/rest/view/v1/messages/sent",
+                "drafts": "/api/rest/view/v1/messages/drafts"}[args.folder]
+        daten = client.hole_json(pfad, bearer=True, zweck="Mitteilungen")
+        schluessel = next((k for k in ("incomingMessages", "sentMessages",
+                                       "draftMessages", "messages")
+                           if k in daten), None)
+        liste = daten.get(schluessel, []) if schluessel else []
+        if ausgabe(liste, args.json):
+            return
+        for m in liste[:args.limit]:
+            wer = (m.get("sender") or m.get("recipients") or [{}])
+            name = wer.get("displayName") if isinstance(wer, dict) else (
+                ", ".join(x.get("displayName", "?") for x in wer))
+            print(f"{m['id']}\t{(m.get('sentDateTime') or '')[:10]}\t"
+                  f"{name}\t{m.get('subject')}")
+    elif args.msg_cmd == "read":
+        m = client.hole_json(f"/api/rest/view/v1/messages/{args.id}",
+                             bearer=True, zweck="Mitteilung")
+        if ausgabe(m, args.json):
+            return
+        print(f"Von:     {(m.get('sender') or {}).get('displayName')}")
+        print(f"Datum:   {m.get('sentDateTime')}")
+        print(f"Betreff: {m.get('subject')}\n")
+        print(m.get("content") or "")
+    elif args.msg_cmd == "recipients":
+        gruppen = client.hole_json(
+            "/api/rest/view/v1/messages/recipients/static/persons",
+            bearer=True, zweck="Empfaenger")
+        if ausgabe(gruppen, args.json):
+            return
+        for gruppe in gruppen:
+            personen = gruppe.get("persons") or []
+            print(f"\n[{gruppe.get('type')}] {len(personen)}")
+            for p in personen:
+                print(f"  {p.get('userId')}\t{p.get('displayName')}\t"
+                      f"{', '.join(p.get('tags') or [])}")
+    elif args.msg_cmd == "permissions":
+        rechte = client.hole_json("/api/rest/view/v1/messages/permissions",
+                                  bearer=True, zweck="Senderechte")
+        if ausgabe(rechte, args.json):
+            return
+        print(json.dumps(rechte, ensure_ascii=False, indent=2))
+    elif args.msg_cmd == "send":
+        cmd_send(args, client)
+
+
+def cmd_send(args, client):
+    """Versand ueber denselben Endpunkt wie die Weboberflaeche (v2, multipart)."""
+    inhalt = args.body
+    if inhalt == "-":
+        inhalt = sys.stdin.read()
+    nutzlast = {
+        "subject": args.subject,
+        "content": inhalt,
+        "requestConfirmation": False,
+        "recipientUserIds": [int(i) for i in args.to],
+        "oneDriveAttachments": [],
+        "forbidReply": False,
+    }
+    if args.dry_run:
+        print(json.dumps(nutzlast, ensure_ascii=False, indent=2))
+        return
+    status, text = client.sende_multipart(
+        "/api/rest/view/v2/messages/users", nutzlast)
+    if status not in (200, 201):
+        raise Fehler(fehlertext(status, text, "Senden"))
+    print(f"Gesendet. Antwort: {text[:300]}")
+
+
+# --------------------------------------------------------------------------
+
+def parser_bauen():
+    p = argparse.ArgumentParser(prog="webuntis", description=__doc__)
+    p.add_argument("--json", action="store_true", help="Rohdaten als JSON")
+
+    # --json soll vor UND nach dem Subcommand stehen duerfen. Der Elternparser
+    # wird an jeden Subparser gehaengt; SUPPRESS verhindert, dass dessen
+    # Default das bereits gesetzte --json der obersten Ebene ueberschreibt.
+    gemeinsam = argparse.ArgumentParser(add_help=False)
+    gemeinsam.add_argument("--json", action="store_true",
+                           default=argparse.SUPPRESS,
+                           help="Rohdaten als JSON")
+
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("setup", parents=[gemeinsam],
+                       help="Konfiguration und Schluesselbund einrichten")
+    s.add_argument("--server")
+    s.add_argument("--school")
+    s.add_argument("--username")
+    s.add_argument("--force", action="store_true")
+
+    sub.add_parser("whoami", parents=[gemeinsam],
+                   help="Login pruefen, Schule und Kinder anzeigen")
+    sub.add_parser("students", parents=[gemeinsam],
+                   help="Zugeordnete Kinder auflisten")
+    sub.add_parser("classes", parents=[gemeinsam],
+                   help="Alle Klassen der Schule mit id")
+
+    t = sub.add_parser("timetable", parents=[gemeinsam], help="Stundenplan")
+    t.add_argument("--student", help="Name oder id, sonst das erste Kind")
+    t.add_argument("--class", dest="klasse",
+                   help="Klassenplan statt Schuelerplan, z.B. 2a")
+    t.add_argument("--date", help="Startdatum YYYY-MM-DD (Standard: heute)")
+    t.add_argument("--days", type=int, default=5)
+
+    n = sub.add_parser("news", parents=[gemeinsam],
+                       help="Tagesnachrichten der Schule")
+    n.add_argument("--date")
+
+    h = sub.add_parser("homework", parents=[gemeinsam], help="Hausaufgaben")
+    h.add_argument("--student", help="Name oder id, sonst alle Kinder")
+    h.add_argument("--date")
+    h.add_argument("--days", type=int, default=14)
+
+    a = sub.add_parser("absences", parents=[gemeinsam], help="Abwesenheiten")
+    a.add_argument("--date")
+    a.add_argument("--days", type=int, default=30)
+
+    m = sub.add_parser("messages", parents=[gemeinsam],
+                       help="Mitteilungs-Center")
+    msub = m.add_subparsers(dest="msg_cmd", required=True)
+    ml = msub.add_parser("list", parents=[gemeinsam])
+    ml.add_argument("--folder", choices=["inbox", "sent", "drafts"],
+                    default="inbox")
+    ml.add_argument("--limit", type=int, default=20)
+    mr = msub.add_parser("read", parents=[gemeinsam])
+    mr.add_argument("id")
+    msub.add_parser("recipients", parents=[gemeinsam])
+    msub.add_parser("permissions", parents=[gemeinsam])
+    ms = msub.add_parser("send", parents=[gemeinsam])
+    ms.add_argument("--to", nargs="+", required=True, help="userId(s)")
+    ms.add_argument("--subject", required=True)
+    ms.add_argument("--body", required=True, help="Text oder '-' fuer stdin")
+    ms.add_argument("--dry-run", action="store_true",
+                    help="Nutzlast zeigen, nichts senden")
+    return p
+
+
+def main():
+    args = parser_bauen().parse_args()
+    try:
+        if args.cmd == "setup":
+            cmd_setup(args)
+            return 0
+        client = Client(config_laden())
+        {"whoami": cmd_whoami, "students": cmd_students,
+         "classes": cmd_classes,
+         "timetable": cmd_timetable, "news": cmd_news,
+         "homework": cmd_homework, "absences": cmd_absences,
+         "messages": cmd_messages}[args.cmd](args, client)
+        return 0
+    except Fehler as err:
+        print(f"Fehler: {err}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

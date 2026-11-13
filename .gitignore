@@ -1,0 +1,4 @@
+webuntis.json
+*.cookies
+.DS_Store
+__pycache__/
