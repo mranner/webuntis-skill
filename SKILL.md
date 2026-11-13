@@ -75,7 +75,7 @@ Passwort auf dem Terminal abfragt.
 | `timetable` | Stundenplan (`--student`, `--class`, `--date`, `--days`) |
 | `news` | Tagesnachrichten der Schule (`--date`) |
 | `homework` | Hausaufgaben (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
-| `absences` | Abwesenheiten (`--date`, `--days`) |
+| `absences` | Abwesenheiten (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
 | `messages list` | Posteingang, Gesendet oder Entwürfe (`--folder`) |
 | `messages read <id>` | Eine Mitteilung im Volltext |
 | `messages recipients` | Mögliche Empfänger mit userId |
@@ -104,6 +104,7 @@ python3 "$SKILL_DIR/webuntis" timetable --student Anna --days 5
 python3 "$SKILL_DIR/webuntis" timetable --class 2a --days 5
 python3 "$SKILL_DIR/webuntis" news --date heute
 python3 "$SKILL_DIR/webuntis" homework --student Ben --date heute --days 3
+python3 "$SKILL_DIR/webuntis" absences --student Ben --date 2026-09-14 --days 90
 python3 "$SKILL_DIR/webuntis" messages list --folder inbox --limit 10
 python3 "$SKILL_DIR/webuntis" messages read 12345
 ```
@@ -164,22 +165,27 @@ um zwei Leerzeichen eingerückt).
 ## Was eine Schule freigibt (Beispiel)
 
 Geprüft am 14.09.2026 mit einem Erziehungsberechtigten-Account an einer
-österreichischen AHS. Andere Schulen schalten andere Bereiche frei:
+österreichischen AHS, nachgeprüft am 13.11.2026. Andere Schulen schalten
+andere Bereiche frei:
 
 | Bereich | Status |
 |---------|--------|
 | Stundenplan Klasse | funktioniert, vollständige Daten |
-| Stundenplan Schüler | leer, solange die Schülerzuordnung fehlt |
+| Stundenplan Schüler | funktioniert; leer, solange die Schülerzuordnung fehlt (zu Schulbeginn) |
 | Tagesnachrichten | funktioniert |
 | Mitteilungen lesen | funktioniert |
 | Mitteilungen senden | erlaubt, `recipientOptions: ["TEACHER"]`, max. 5 Anhänge a 7 MB |
-| Mitteilungen senden (Skript) | funktioniert seit 18.09.2026, siehe unten |
+| Mitteilungen senden (Skript) | v2 seit 18.09.2026, scharf gelaufen seit November 2026, siehe unten |
 | Hausaufgaben | Endpunkt antwortet, war leer |
-| Abwesenheiten | HTTP 500 -- an dieser Schule nicht aktiv |
+| Abwesenheiten | funktioniert, nur je Kind mit `studentId` (ohne: HTTP 500) |
+| Sprechstunden | lesbar, Anmeldung laut Einstellungen erlaubt -- im Script noch nicht, siehe unten |
 | Prüfungen | HTTP 403 -- für Eltern gesperrt |
 
-Bei 403/500 meldet das Script das im Klartext. Das ist **kein Bug im Skill**,
-sondern eine Rechteeinstellung der Schule -- nicht versuchen zu umgehen.
+Bei 403/500 meldet das Script das im Klartext. Oft ist das eine
+Rechteeinstellung der Schule -- nicht versuchen zu umgehen. **Ein 500 kann aber
+auch ein fehlender Parameter sein:** die Abwesenheiten galten bis 13.11.2026
+als "an dieser Schule nicht aktiv", tatsächlich fehlte nur die `studentId`.
+Vor dem Urteil "gesperrt" den Request der Weboberfläche vergleichen.
 
 ### Prüfungstermine trotzdem aus dem Stundenplan
 
@@ -236,6 +242,42 @@ wiederverwendet werden. Die REST-Endpunkte unter
 `/WebUntis/api/token/new`; das Script holt es automatisch und erneuert es bei
 HTTP 401. Ältere Endpunkte (`/api/public/...`, `/api/homeworks/...`) kommen
 mit der Cookie-Session aus.
+
+### Abwesenheiten
+
+`GET /api/classreg/absences/students?studentId=<id>&startDate=YYYYMMDD&endDate=YYYYMMDD&excuseStatusId=-1&includeTodaysAbsence=true`
+
+Ohne `studentId` antwortet der Server mit **500 `INTERNAL_ERROR`**, deshalb
+fragt `absences` je Kind einzeln. `excuseStatusId`: `-1` alle, `-2`
+entschuldigt, `-3` nicht entschuldigt, `0` offen (Liste aus
+`/api/classreg/absences/meta`). Laut `meta` dürfte der Eltern-Account
+Abwesenheiten auch melden und entschuldigen (`canReportAbsence`,
+`canExcuse`) -- diese schreibenden Requests sind nicht aufgezeichnet und im
+Script nicht nachgebaut.
+
+### Sprechstunden (noch nicht im Script)
+
+Aus einer Aufzeichnung der Weboberfläche (13.11.2026), alle mit der
+Cookie-Session:
+
+| Endpunkt | Inhalt |
+|---|---|
+| `GET /api/public/officehours/classes` | Klassen mit `id` und `label` |
+| `GET /api/public/officehours/hours?date=YYYYMMDD&klasseId=<id>` | Sprechstunden der Woche ab `date`: Lehrkraft, Tag, Zeit, Raum, `available`, `registered`; `klasseId=-1` für alle |
+| `GET /api/public/officehours/registrations` | eigene Anmeldungen |
+| `GET /api/public/officehours/settings` | u.a. `allowRegistration`, `noAppointmentMsg` |
+
+Die Anmeldung selbst (vermutlich ein `POST`) ist nicht aufgezeichnet.
+
+### Neues Stundenplan-API
+
+Die Weboberfläche lädt den Stundenplan inzwischen über
+`GET /api/rest/view/v1/timetable/entries?start=YYYY-MM-DD&end=YYYY-MM-DD&format=1&resourceType=STUDENT&resources=<id>&timetableType=MY_TIMETABLE&layout=START_TIME`
+(Klasse: `resourceType=CLASS`, `timetableType=STANDARD`). Die Antwort ist
+reichhaltiger als `public/timetable/weekly/data`, das `timetable` noch nutzt:
+`gridEntries` mit `status`, `notesAll` (Notizen der Lehrkraft), Lehrkraft und
+Raum mit Kurz- und Langnamen. Das alte API funktioniert weiter, ist aber der
+wahrscheinlichste Kandidat für eine Abschaltung.
 
 ## Grenzen
 

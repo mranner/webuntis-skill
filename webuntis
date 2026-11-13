@@ -570,16 +570,27 @@ def cmd_absences(args, client):
     client.sicherstellen()
     von = datum(args.date, date.today() - timedelta(days=30))
     bis = von + timedelta(days=args.days - 1)
-    daten = client.hole_json(
-        "/api/classreg/absences/students"
-        f"?startDate={von:%Y%m%d}&endDate={bis:%Y%m%d}"
-        "&excuseStatusId=-1&includeTodaysAbsence=true",
-        zweck="Abwesenheiten",
-    )["data"]
-    if ausgabe(daten, args.json):
+    # Ohne studentId antwortet der Server mit 500 -- je Kind einzeln abfragen
+    kinder = ([schueler_waehlen(client, args.student)] if args.student
+              else schueler_liste(client))
+    ergebnis = []
+    for kind in kinder:
+        daten = client.hole_json(
+            "/api/classreg/absences/students"
+            f"?studentId={kind['id']}&startDate={von:%Y%m%d}&endDate={bis:%Y%m%d}"
+            "&excuseStatusId=-1&includeTodaysAbsence=true",
+            zweck="Abwesenheiten",
+        )["data"]
+        ergebnis.append({"student": kind["name"], "data": daten})
+    if ausgabe(ergebnis, args.json):
         return
-    for a in daten.get("absences") or []:
-        print(f"{a.get('startDate')}\t{a.get('reason')}\t{a.get('excuseStatus')}")
+    for e in ergebnis:
+        abw = e["data"].get("absences") or []
+        if not abw:
+            print(f"{e['student']}\tkeine Abwesenheiten zwischen {von} und {bis}")
+        for a in abw:
+            print(f"{a.get('startDate')}\t{e['student']}\t{a.get('reason')}"
+                  f"\t{a.get('excuseStatus')}")
 
 
 def cmd_messages(args, client):
@@ -702,6 +713,7 @@ def parser_bauen():
     h.add_argument("--days", type=int, default=14)
 
     a = sub.add_parser("absences", parents=[gemeinsam], help="Abwesenheiten")
+    a.add_argument("--student", help="Name oder id, sonst alle Kinder")
     a.add_argument("--date")
     a.add_argument("--days", type=int, default=30)
 
