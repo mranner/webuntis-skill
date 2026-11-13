@@ -78,6 +78,7 @@ Passwort auf dem Terminal abfragt.
 | `homework` | Hausaufgaben (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
 | `absences` | Abwesenheiten (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
 | `officehours` | Sprechstunden der Lehrkräfte (`--class`, `--teacher`, `--date`, `--weeks`); mit `--class` samt Fächern in der Klasse |
+| `teachers` | Alle Lehrkräfte einer Klasse (`--class`) oder eines Kindes (`--student`) mit Fächern und nächster Sprechstunde (`--date`) |
 | `messages list` | Posteingang, Gesendet oder Entwürfe (`--folder`) |
 | `messages read <id>` | Eine Mitteilung im Volltext |
 | `messages recipients` | Mögliche Empfänger mit userId |
@@ -109,6 +110,8 @@ python3 "$SKILL_DIR/webuntis" homework --student Ben --date heute --days 3
 python3 "$SKILL_DIR/webuntis" absences --student Ben --date 2026-09-14 --days 90
 python3 "$SKILL_DIR/webuntis" officehours --class 2a --weeks 2
 python3 "$SKILL_DIR/webuntis" officehours --teacher MUS --date morgen
+python3 "$SKILL_DIR/webuntis" teachers --student Anna
+python3 "$SKILL_DIR/webuntis" teachers --class 2a
 python3 "$SKILL_DIR/webuntis" messages list --folder inbox --limit 10
 python3 "$SKILL_DIR/webuntis" messages read 12345
 ```
@@ -277,6 +280,14 @@ hängt ihre Fächer in dieser Klasse an: aus dem Klassenplan (mindestens zwei
 Wochen, wegen 14-tägiger Fächer), verknüpft über das Kürzel in
 "NAME, Vorname (KZ)"; mit `--json` im Feld `subjects`. Der Klassenplan
 enthält alle Gruppen -- nicht jede Lehrkraft unterrichtet jedes Kind.
+
+`teachers` geht vom Plan aus statt von den Sprechstunden: alle Lehrkräfte aus
+14 Tagen Klassen- oder Schülerplan ab `--date`, auch die ohne Sprechstunde.
+Für die Lehrkräfte **eines Kindes** `--student` nehmen -- nur der Schülerplan
+kennt dessen Gruppen. Name und nächste Sprechstunde kommen aus den
+Sprechstunden **aller** Klassen der nächsten 14 Tage; hat eine Lehrkraft dort
+keine, steht nur das Kürzel mit `?` da (der Plan liefert keine Namen).
+
 Die Anmeldung selbst (vermutlich ein `POST`) ist nicht aufgezeichnet.
 
 ### Neues Stundenplan-API -- geprüft, nicht übernommen

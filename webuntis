@@ -594,6 +594,54 @@ def cmd_absences(args, client):
                   f"\t{a.get('excuseStatus')}")
 
 
+def sprechstunden(client, klasse_id, von, bis):
+    """Sprechstunden zwischen von und bis; klasse_id -1 fuer alle Klassen."""
+    # Eine Abfrage liefert die Woche ab date (teils etwas mehr) -- Woche fuer
+    # Woche holen und doppelte Termine zusammenfassen
+    termine, montag = {}, von - timedelta(days=von.weekday())
+    while montag <= bis:
+        for t in client.hole_json(
+            f"/api/public/officehours/hours?date={montag:%Y%m%d}&klasseId={klasse_id}",
+            zweck="Sprechstunden",
+        )["data"]:
+            termine[(t["teacherId"], t["date"], t.get("startTime"))] = t
+        montag += timedelta(days=7)
+    liste = [t for t in termine.values()
+             if t["date"] == 0 or von <= datetime.strptime(str(t["date"]), "%Y%m%d").date() <= bis]
+    liste.sort(key=lambda t: (t["date"] == 0, t["date"], t.get("uStartTime") or 0,
+                              t.get("teacher") or ""))
+    return liste
+
+
+def kuerzel(lehrkraft):
+    """Kuerzel aus "NAME, Vorname (KZ)" -- so verknuepfen sich Sprechstunden und Plan."""
+    kz = re.search(r"\(([^)]+)\)\s*$", lehrkraft or "")
+    return kz.group(1) if kz else None
+
+
+def faecher_je_lehrer(client, element_typ, element_id, von, bis):
+    """Lehrerkuerzel -> Faecher aus dem Plan, mindestens zwei Wochen (14-taegige Faecher)."""
+    perioden, namen = wochenplan(client, element_typ, element_id, von,
+                                 max(bis, von + timedelta(days=13)))
+    faecher = {}
+    for p in perioden:
+        lehrer = [namen.get((ELEMENT_LEHRER, e["id"])) for e in p["elements"]
+                  if e["type"] == ELEMENT_LEHRER]
+        fach = [namen.get((ELEMENT_FACH, e["id"])) for e in p["elements"]
+                if e["type"] == ELEMENT_FACH]
+        for l in lehrer:
+            if l and l.strip("-"):
+                faecher.setdefault(l, set()).update(f for f in fach if f)
+    return faecher
+
+
+def sprechstunde_text(t):
+    if t["date"] == 0:
+        return "nach Vereinbarung"
+    tag = datetime.strptime(str(t["date"]), "%Y%m%d").date()
+    return f"{WOCHENTAG[tag.weekday()]} {tag:%d.%m.} {t['startTime']}-{t['endTime']}"
+
+
 def cmd_officehours(args, client):
     client.sicherstellen()
     klasse_id = -1
@@ -609,53 +657,22 @@ def cmd_officehours(args, client):
 
     von = datum(args.date)
     bis = von + timedelta(weeks=args.weeks) - timedelta(days=1)
-    # Eine Abfrage liefert die Woche ab date (teils etwas mehr) -- Woche fuer
-    # Woche holen und doppelte Termine zusammenfassen
-    termine, montag = {}, von - timedelta(days=von.weekday())
-    while montag <= bis:
-        for t in client.hole_json(
-            f"/api/public/officehours/hours?date={montag:%Y%m%d}&klasseId={klasse_id}",
-            zweck="Sprechstunden",
-        )["data"]:
-            termine[(t["teacherId"], t["date"], t.get("startTime"))] = t
-        montag += timedelta(days=7)
-
-    liste = [t for t in termine.values()
-             if t["date"] == 0 or von <= datetime.strptime(str(t["date"]), "%Y%m%d").date() <= bis]
+    liste = sprechstunden(client, klasse_id, von, bis)
     if args.teacher:
         such = args.teacher.lower()
         liste = [t for t in liste if such in (t.get("teacher") or "").lower()]
-    liste.sort(key=lambda t: (t["date"] == 0, t["date"], t.get("uStartTime") or 0,
-                              t.get("teacher") or ""))
     if args.klasse:
-        # Faecher je Lehrkraft aus dem Klassenplan, mindestens zwei Wochen
-        # (14-taegige Faecher); verknuepft ueber das Kuerzel "NAME, Vorname (KZ)"
         klasse = klasse_waehlen(client, args.klasse)
-        perioden, namen = wochenplan(client, ELEMENT_KLASSE, klasse["id"], von,
-                                     max(bis, von + timedelta(days=13)))
-        faecher = {}
-        for p in perioden:
-            lehrer = [namen.get((ELEMENT_LEHRER, e["id"])) for e in p["elements"]
-                      if e["type"] == ELEMENT_LEHRER]
-            fach = [namen.get((ELEMENT_FACH, e["id"])) for e in p["elements"]
-                    if e["type"] == ELEMENT_FACH]
-            for l in lehrer:
-                faecher.setdefault(l, set()).update(f for f in fach if f)
+        faecher = faecher_je_lehrer(client, ELEMENT_KLASSE, klasse["id"], von, bis)
         for t in liste:
-            kz = re.search(r"\(([^)]+)\)\s*$", t.get("teacher") or "")
-            t["subjects"] = sorted(faecher.get(kz.group(1), ())) if kz else []
+            t["subjects"] = sorted(faecher.get(kuerzel(t.get("teacher")), ()))
     if ausgabe(liste, args.json):
         return
     if not liste:
         print(f"Keine Sprechstunden zwischen {von} und {bis}.")
         return
     for t in liste:
-        if t["date"] == 0:
-            wann = "nach Vereinbarung"
-        else:
-            tag = datetime.strptime(str(t["date"]), "%Y%m%d").date()
-            wann = f"{WOCHENTAG[tag.weekday()]} {tag:%d.%m.} {t['startTime']}-{t['endTime']}"
-        zeile = f"{wann:<22}  {t.get('teacher')}"
+        zeile = f"{sprechstunde_text(t):<22}  {t.get('teacher')}"
         if args.klasse:
             zeile += f"  {', '.join(t['subjects']) or '(kein Fach)'}"
         if t.get("rooms"):
@@ -665,6 +682,43 @@ def cmd_officehours(args, client):
         elif t["date"] and not t.get("available"):
             zeile += "  [nicht verfuegbar]"
         print(zeile)
+
+
+def cmd_teachers(args, client):
+    client.sicherstellen()
+    if args.klasse:
+        ziel = klasse_waehlen(client, args.klasse)
+        typ, titel = ELEMENT_KLASSE, f"Klasse {ziel['name']}"
+    else:
+        ziel = schueler_waehlen(client, args.student)
+        typ, titel = ELEMENT_SCHUELER, ziel["name"]
+    von = datum(args.date)
+    faecher = faecher_je_lehrer(client, typ, ziel["id"], von, von)
+    # Namen und Sprechstunden aus allen Klassen -- auch wer in einer anderen
+    # Klasse Sprechstunde hat, bekommt so seinen Namen
+    stunden = {}
+    for t in sprechstunden(client, -1, von, von + timedelta(days=13)):
+        stunden.setdefault(kuerzel(t.get("teacher")), []).append(t)
+    liste = []
+    for kz in sorted(faecher):
+        termine = stunden.get(kz, [])
+        liste.append({"kuerzel": kz,
+                      "name": termine[0]["teacher"].rsplit(" (", 1)[0] if termine else None,
+                      "subjects": sorted(faecher[kz]),
+                      "officehours": termine})
+    if ausgabe(liste, args.json):
+        return
+    print(f"Lehrkraefte {titel} -- Plan ab {von}, 14 Tage")
+    for l in liste:
+        zeile = f"{l['kuerzel']:<6} {l['name'] or '?':<28} {', '.join(l['subjects']):<16}"
+        if l["officehours"]:
+            t = l["officehours"][0]
+            zeile += f" {sprechstunde_text(t)}"
+            if t.get("rooms"):
+                zeile += f"  Raum {t['rooms']}"
+        else:
+            zeile += " keine Sprechstunde"
+        print(zeile.rstrip())
 
 
 def cmd_messages(args, client):
@@ -799,6 +853,13 @@ def parser_bauen():
     o.add_argument("--date")
     o.add_argument("--weeks", type=int, default=1)
 
+    lk = sub.add_parser("teachers", parents=[gemeinsam],
+                        help="Lehrkraefte einer Klasse oder eines Kindes")
+    ziel = lk.add_mutually_exclusive_group()
+    ziel.add_argument("--class", dest="klasse", help="Klasse, z.B. 2a")
+    ziel.add_argument("--student", help="Name oder id, sonst das erste Kind")
+    lk.add_argument("--date")
+
     m = sub.add_parser("messages", parents=[gemeinsam],
                        help="Mitteilungs-Center")
     msub = m.add_subparsers(dest="msg_cmd", required=True)
@@ -830,7 +891,8 @@ def main():
          "classes": cmd_classes,
          "timetable": cmd_timetable, "news": cmd_news,
          "homework": cmd_homework, "absences": cmd_absences,
-         "officehours": cmd_officehours, "messages": cmd_messages}[args.cmd](args, client)
+         "officehours": cmd_officehours, "teachers": cmd_teachers,
+         "messages": cmd_messages}[args.cmd](args, client)
         return 0
     except Fehler as err:
         print(f"Fehler: {err}", file=sys.stderr)
