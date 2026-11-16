@@ -794,6 +794,91 @@ def cmd_send(args, client):
     print(f"Gesendet. Antwort: {text[:300]}")
 
 
+def sprechtag_rpc(client, csrf, methode, params):
+    """JSON-RPC des Sprechtags: Cookie-Session plus CSRF-Token aus main.do, ohne: 403."""
+    status, text = client._roh(
+        "POST", "/jsonrpc_web/jsonParentsDayService",
+        daten={"id": 0, "method": methode, "params": params, "jsonrpc": "2.0"},
+        headers={"X-CSRF-Token": csrf})
+    if status != 200:
+        raise Fehler(fehlertext(status, text, f"Sprechtag {methode}"))
+    antwort = json.loads(text)
+    if antwort.get("error"):
+        raise Fehler(f"Sprechtag {methode}: {antwort['error']}")
+    return antwort["result"]
+
+
+def uhrzeit(wert):
+    return f"{wert // 100:02d}:{wert % 100:02d}"
+
+
+def cmd_parentsday(args, client):
+    client.sicherstellen()
+    # Sprechtage und CSRF-Token stehen nur im HTML der Startseite
+    status, html = client._roh("GET", "/main.do")
+    csrf = re.search(r'name="_csrf" value="([^"]+)"', html)
+    if status != 200 or not csrf:
+        raise Fehler("Startseite main.do ohne CSRF-Token.")
+    csrf = csrf.group(1)
+    ids = list(dict.fromkeys(re.findall(r"parentsday/parentview\?selId=(\d+)", html)))
+    if args.id:
+        pd_id = int(args.id)
+    elif len(ids) == 1:
+        pd_id = int(ids[0])
+    elif not ids:
+        raise Fehler("Kein Sprechtag auf der Startseite angekuendigt.")
+    else:
+        raise Fehler(f"Mehrere Sprechtage ({', '.join(ids)}), mit --id waehlen.")
+
+    meta = sprechtag_rpc(client, csrf, "getParentsDayMetaData", [str(pd_id), -1])
+    if args.pd_cmd == "info":
+        if ausgabe(meta, args.json):
+            return
+        print(f"{meta['name']} (id {meta['id']})")
+        print(f"Datum:         {meta.get('parentsDayDateRange')}, "
+              f"{uhrzeit(meta['minTime'])}-{uhrzeit(meta['maxTime'])}")
+        print(f"Status:        {meta.get('state')}")
+        print(f"Buchung:       {meta.get('appointmentSelectionDateTimeRange')}")
+        return
+
+    if args.pd_cmd == "list":
+        slots = sprechtag_rpc(client, csrf, "getParentTimeSlots", [pd_id, -1])
+        termine = [s["appointment"] for s in slots if s.get("appointment")]
+        if ausgabe(termine, args.json):
+            return
+        if not termine:
+            print("Keine Termine gebucht.")
+        for t in termine:
+            ts = t["timeSlot"]
+            kinder = ", ".join(s["name"] for s in t.get("students", []))
+            print(f"{uhrzeit(ts['startTime'])}-{uhrzeit(ts['endTime'])}  "
+                  f"{t.get('teacherName'):<24} {', '.join(t.get('subjects') or []):<14} "
+                  f"Raum {t.get('roomName') or '?':<5} {kinder}")
+        return
+
+    # free: Matrix je Zeitblock ueber die Lehrkraefte, die ein Kind unterrichten
+    reg = sprechtag_rpc(client, csrf, "getParentsRegistrationData", [pd_id, -1])
+    lehrer = [t["id"] for t in reg["teachers"]
+              if any(d.get("isTeachingStudent") for d in t["data"].values())]
+    zeilen = []
+    for block in meta["timeBlocks"]:
+        matrix = sprechtag_rpc(client, csrf, "getMatrixData",
+                               [pd_id, block["id"], -1, lehrer])
+        namen = {c["id"]: (c["details"][0]["label"] if c.get("details") else c["label"])
+                 for c in matrix["columns"]}
+        for r in matrix["rows"]:
+            zeilen.append({"time": r["label"],
+                           "booked": [namen.get(i, i) for i in r["relations"]],
+                           "possible": [namen.get(i, i) for i in r["possibilities"]]})
+    if ausgabe(zeilen, args.json):
+        return
+    frei = [z for z in zeilen if z["possible"]]
+    if not frei:
+        print("Keine weiteren Termine buchbar.")
+    for z in frei:
+        print(f"{z['time']}  {', '.join(z['possible'])}")
+
+
 # --------------------------------------------------------------------------
 
 def parser_bauen():
@@ -860,6 +945,15 @@ def parser_bauen():
     ziel.add_argument("--student", help="Name oder id, sonst das erste Kind")
     lk.add_argument("--date")
 
+    pd = sub.add_parser("parentsday", parents=[gemeinsam],
+                        help="Elternsprechtag (nur lesend)")
+    pdsub = pd.add_subparsers(dest="pd_cmd", required=True)
+    for name, hilfe in (("info", "Sprechtag, Status, Buchungsfenster"),
+                        ("list", "eigene Termine"),
+                        ("free", "je Zeit die noch buchbaren Lehrkraefte")):
+        x = pdsub.add_parser(name, parents=[gemeinsam], help=hilfe)
+        x.add_argument("--id", help="Sprechtag-id, sonst der angekuendigte")
+
     m = sub.add_parser("messages", parents=[gemeinsam],
                        help="Mitteilungs-Center")
     msub = m.add_subparsers(dest="msg_cmd", required=True)
@@ -892,7 +986,7 @@ def main():
          "timetable": cmd_timetable, "news": cmd_news,
          "homework": cmd_homework, "absences": cmd_absences,
          "officehours": cmd_officehours, "teachers": cmd_teachers,
-         "messages": cmd_messages}[args.cmd](args, client)
+         "messages": cmd_messages, "parentsday": cmd_parentsday}[args.cmd](args, client)
         return 0
     except Fehler as err:
         print(f"Fehler: {err}", file=sys.stderr)

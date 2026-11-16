@@ -2,12 +2,13 @@
 name: webuntis
 description: >
   WebUntis für Erziehungsberechtigte: Stundenplan der Kinder, Tagesnachrichten
-  der Schule, Hausaufgaben, Abwesenheiten, Sprechstunden der Lehrkräfte und
-  das Mitteilungs-Center (Posteingang lesen, an Lehrkräfte schreiben). Läuft
+  der Schule, Hausaufgaben, Abwesenheiten, Sprechstunden der Lehrkräfte, die
+  eigenen Termine am Elternsprechtag und das Mitteilungs-Center (Posteingang lesen, an Lehrkräfte schreiben). Läuft
   headless über die REST-API, Passwort aus dem macOS-Schlüsselbund - kein
   Browser nötig. Auch bei "was hat mein Kind morgen", "Stundenplan diese
   Woche", "gibt es neue Nachrichten in WebUntis", "schreib der Lehrerin",
-  "fällt eine Stunde aus", "wann hat die Lehrerin Sprechstunde".
+  "fällt eine Stunde aus", "wann hat die Lehrerin Sprechstunde",
+  "welche Sprechtagstermine haben wir", "was ist am Sprechtag noch frei".
   Trigger: /webuntis.
 ---
 
@@ -79,6 +80,9 @@ Passwort auf dem Terminal abfragt.
 | `absences` | Abwesenheiten (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
 | `officehours` | Sprechstunden der Lehrkräfte (`--class`, `--teacher`, `--date`, `--weeks`); mit `--class` samt Fächern in der Klasse |
 | `teachers` | Alle Lehrkräfte einer Klasse (`--class`) oder eines Kindes (`--student`) mit Fächern und nächster Sprechstunde (`--date`) |
+| `parentsday info` | Elternsprechtag: Datum, Status, Buchungsfenster (`--id`, sonst der angekündigte) |
+| `parentsday list` | Eigene Sprechtagstermine: Zeit, Lehrkraft, Fächer, Raum, Kinder |
+| `parentsday free` | Je Zeit die Lehrkräfte, die das Konto noch buchen kann |
 | `messages list` | Posteingang, Gesendet oder Entwürfe (`--folder`) |
 | `messages read <id>` | Eine Mitteilung im Volltext |
 | `messages recipients` | Mögliche Empfänger mit userId |
@@ -186,6 +190,7 @@ andere Bereiche frei:
 | Hausaufgaben | Endpunkt antwortet, war leer |
 | Abwesenheiten | funktioniert, nur je Kind mit `studentId` (ohne: HTTP 500) |
 | Sprechstunden | funktioniert (`officehours`); Anmeldung laut Einstellungen erlaubt, im Script noch nicht |
+| Elternsprechtag | lesen funktioniert (`parentsday`); Buchen und Stornieren aufgezeichnet, im Script nicht |
 | Prüfungen | HTTP 403 -- für Eltern gesperrt |
 
 Bei 403/500 meldet das Script das im Klartext. Oft ist das eine
@@ -289,6 +294,34 @@ Sprechstunden **aller** Klassen der nächsten 14 Tage; hat eine Lehrkraft dort
 keine, steht nur das Kürzel mit `?` da (der Plan liefert keine Namen).
 
 Die Anmeldung selbst (vermutlich ein `POST`) ist nicht aufgezeichnet.
+
+### Elternsprechtag
+
+Eigener JSON-RPC-Dienst, nicht die REST-API:
+`POST /jsonrpc_web/jsonParentsDayService`, Körper
+`{"id":0,"method":"<name>","params":[...],"jsonrpc":"2.0"}`. Er braucht die
+Cookie-Session **und** den Header `X-CSRF-Token`, sonst **403 „Access
+denied"**. Das Token steht als `<input name="_csrf">` im HTML von
+`GET /main.do`; ein Bearer-Token braucht der Dienst nicht. Dort steht auch die
+Sprechtag-id, als `parentsday/parentview?selId=<id>` -- nur solange die
+Schule den Sprechtag auf der Startseite ankündigt.
+
+| Methode | Parameter | Inhalt |
+|---|---|---|
+| `getParentsDayMetaData` | `["<id>", -1]` (id als String) | Name, `state`, Buchungsfenster `appointmentSelectionDateTimeRange`, `timeBlocks` mit 5-Minuten-`timeSlots` |
+| `getParentsRegistrationData` | `[id, -1]` | alle Lehrkräfte (Kürzel); je Kind `isTeachingStudent` und Fächer |
+| `getParentTimeSlots` | `[id, -1]` | alle Slots, gebuchte mit `appointment`: Lehrkraft, Fächer, Raum, Kinder -- dieselben Daten wie der PDF-Export |
+| `getMatrixData` | `[id, blockId, -1, [lehrer-ids]]` | Spalten = Lehrkräfte (voller Name in `details[0].label`), Zeilen = Slots mit `relations` (gebucht) und `possibilities` (noch buchbar) |
+| `saveAppointment` / `cancelAppointment` | `[id, lehrerId, blockId, slotId, -1, [1]]` | bucht bzw. storniert; Antwort: neue Matrix und Slots |
+
+`possibilities` berücksichtigt schon, was der Server erlaubt, auch den
+Mindestabstand zwischen zwei Buchungen desselben Kontos. `free` fragt die
+Matrix über die Lehrkräfte ab, die ein Kind unterrichten -- so tut es die
+Weboberfläche. Verifiziert 16.11.2026: `list` deckt sich mit dem PDF-Export,
+`free` mit der Matrix der aufgezeichneten Sitzung.
+
+Buchen und Stornieren sind nicht nachgebaut: Was `-1` und `[1]` bedeuten,
+ist offen, und testen ließe es sich nur an echten Buchungen.
 
 ### Neues Stundenplan-API -- geprüft, nicht übernommen
 
