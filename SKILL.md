@@ -3,12 +3,12 @@ name: webuntis
 description: >
   WebUntis für Erziehungsberechtigte: Stundenplan der Kinder, Tagesnachrichten
   der Schule, Hausaufgaben, Abwesenheiten, Sprechstunden der Lehrkräfte, die
-  eigenen Termine am Elternsprechtag und das Mitteilungs-Center (Posteingang lesen, an Lehrkräfte schreiben). Läuft
+  Termine am Elternsprechtag (lesen, buchen, stornieren) und das Mitteilungs-Center (Posteingang lesen, an Lehrkräfte schreiben). Läuft
   headless über die REST-API, Passwort aus dem macOS-Schlüsselbund - kein
   Browser nötig. Auch bei "was hat mein Kind morgen", "Stundenplan diese
   Woche", "gibt es neue Nachrichten in WebUntis", "schreib der Lehrerin",
   "fällt eine Stunde aus", "wann hat die Lehrerin Sprechstunde",
-  "welche Sprechtagstermine haben wir", "was ist am Sprechtag noch frei".
+  "welche Sprechtagstermine haben wir", "was ist am Sprechtag noch frei", "buch den Sprechtagstermin".
   Trigger: /webuntis.
 ---
 
@@ -83,6 +83,8 @@ Passwort auf dem Terminal abfragt.
 | `parentsday info` | Elternsprechtag: Datum, Status, Buchungsfenster (`--id`, sonst der angekündigte) |
 | `parentsday list` | Eigene Sprechtagstermine: Zeit, Lehrkraft, Fächer, Raum, Kinder |
 | `parentsday free` | Je Zeit die Lehrkräfte, die das Konto noch buchen kann |
+| `parentsday book` | Termin buchen (`--teacher` Kürzel oder Namensteil, `--time HH:MM`) |
+| `parentsday cancel` | Termin stornieren (`--teacher`, `--time`) |
 | `messages list` | Posteingang, Gesendet oder Entwürfe (`--folder`) |
 | `messages read <id>` | Eine Mitteilung im Volltext |
 | `messages recipients` | Mögliche Empfänger mit userId |
@@ -190,7 +192,7 @@ andere Bereiche frei:
 | Hausaufgaben | Endpunkt antwortet, war leer |
 | Abwesenheiten | funktioniert, nur je Kind mit `studentId` (ohne: HTTP 500) |
 | Sprechstunden | funktioniert (`officehours`); Anmeldung laut Einstellungen erlaubt, im Script noch nicht |
-| Elternsprechtag | lesen funktioniert (`parentsday`); Buchen und Stornieren aufgezeichnet, im Script nicht |
+| Elternsprechtag | funktioniert (`parentsday`): lesen, buchen, stornieren |
 | Prüfungen | HTTP 403 -- für Eltern gesperrt |
 
 Bei 403/500 meldet das Script das im Klartext. Oft ist das eine
@@ -320,8 +322,16 @@ Matrix über die Lehrkräfte ab, die ein Kind unterrichten -- so tut es die
 Weboberfläche. Verifiziert 16.11.2026: `list` deckt sich mit dem PDF-Export,
 `free` mit der Matrix der aufgezeichneten Sitzung.
 
-Buchen und Stornieren sind nicht nachgebaut: Was `-1` und `[1]` bedeuten,
-ist offen, und testen ließe es sich nur an echten Buchungen.
+`book` und `cancel` schreiben. Vor dem Aufruf **beim User bestätigen lassen**
+(Lehrkraft und Zeit nennen) -- eine Buchung belegt den Termin für andere Eltern.
+`book` prüft vorher `possibilities`, `cancel` die eigene Buchung; danach prüfen
+beide an den zurückgegebenen `timeSlots`, ob sich die Buchung geändert hat. Eine
+zweite Buchung bei derselben Lehrkraft **verschiebt nicht**, sie kommt dazu --
+verschieben heißt: neu buchen, alten Termin stornieren. `--teacher` trifft das
+Kürzel exakt oder einen Namensteil; „KNECHTL" ist mehrdeutig (KN, KNR) und
+bricht mit beiden Kandidaten ab. `-1` und `[1]` schickt die Weboberfläche so
+mit, ihre Bedeutung ist offen. Verifiziert 16.11.2026: HOL 15:55 gebucht und
+storniert, die übrigen Termine unverändert.
 
 ### Neues Stundenplan-API -- geprüft, nicht übernommen
 

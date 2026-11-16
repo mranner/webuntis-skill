@@ -856,27 +856,63 @@ def cmd_parentsday(args, client):
                   f"Raum {t.get('roomName') or '?':<5} {kinder}")
         return
 
-    # free: Matrix je Zeitblock ueber die Lehrkraefte, die ein Kind unterrichten
+    # free, book, cancel: Matrix je Zeitblock ueber die Lehrkraefte, die ein
+    # Kind unterrichten -- so fragt die Weboberflaeche
     reg = sprechtag_rpc(client, csrf, "getParentsRegistrationData", [pd_id, -1])
     lehrer = [t["id"] for t in reg["teachers"]
               if any(d.get("isTeachingStudent") for d in t["data"].values())]
-    zeilen = []
+    zeilen, spalten = [], {}
     for block in meta["timeBlocks"]:
         matrix = sprechtag_rpc(client, csrf, "getMatrixData",
                                [pd_id, block["id"], -1, lehrer])
-        namen = {c["id"]: (c["details"][0]["label"] if c.get("details") else c["label"])
-                 for c in matrix["columns"]}
+        for c in matrix["columns"]:
+            spalten[c["id"]] = (c["label"], c["details"][0]["label"]
+                                if c.get("details") else c["label"])
         for r in matrix["rows"]:
-            zeilen.append({"time": r["label"],
-                           "booked": [namen.get(i, i) for i in r["relations"]],
-                           "possible": [namen.get(i, i) for i in r["possibilities"]]})
-    if ausgabe(zeilen, args.json):
+            zeilen.append({"time": r["label"], "block": block["id"], "slot": r["id"],
+                           "booked": r["relations"], "possible": r["possibilities"]})
+
+    def name(i):
+        return spalten.get(i, (i, i))[1]
+
+    if args.pd_cmd == "free":
+        liste = [{"time": z["time"], "booked": [name(i) for i in z["booked"]],
+                  "possible": [name(i) for i in z["possible"]]} for z in zeilen]
+        if ausgabe(liste, args.json):
+            return
+        frei = [z for z in liste if z["possible"]]
+        if not frei:
+            print("Keine weiteren Termine buchbar.")
+        for z in frei:
+            print(f"{z['time']}  {', '.join(z['possible'])}")
         return
-    frei = [z for z in zeilen if z["possible"]]
-    if not frei:
-        print("Keine weiteren Termine buchbar.")
-    for z in frei:
-        print(f"{z['time']}  {', '.join(z['possible'])}")
+
+    # book / cancel
+    such = args.teacher.lower()
+    treffer = [i for i, (kz, n) in spalten.items()
+               if kz.lower() == such or such in n.lower()]
+    if len(treffer) != 1:
+        kandidaten = ", ".join(f"{spalten[i][0]} ({spalten[i][1]})" for i in treffer)
+        raise Fehler(f"Lehrkraft '{args.teacher}' nicht eindeutig: {kandidaten or 'kein Treffer'}")
+    lid = treffer[0]
+    zeile = next((z for z in zeilen if z["time"] == args.time), None)
+    if not zeile:
+        raise Fehler(f"Keine Zeit {args.time} am Sprechtag (Format HH:MM).")
+    buchen = args.pd_cmd == "book"
+    if buchen and lid not in zeile["possible"]:
+        raise Fehler(f"{name(lid)} um {args.time} nicht buchbar, siehe 'parentsday free'.")
+    if not buchen and lid not in zeile["booked"]:
+        raise Fehler(f"Kein Termin bei {name(lid)} um {args.time}.")
+    # -1 und [1] schickt die Weboberflaeche so mit, Bedeutung unbekannt
+    ergebnis = sprechtag_rpc(client, csrf,
+                             "saveAppointment" if buchen else "cancelAppointment",
+                             [pd_id, lid, zeile["block"], zeile["slot"], -1, [1]])
+    gebucht = any(s["id"] == zeile["slot"] and s.get("appointment")
+                  and s["appointment"].get("teacherId") == lid
+                  for s in ergebnis.get("timeSlots", []))
+    if gebucht != buchen:
+        raise Fehler("Server hat geantwortet, die Terminliste zeigt aber keine Aenderung.")
+    print(f"{'Gebucht' if buchen else 'Storniert'}: {args.time} {name(lid)}")
 
 
 # --------------------------------------------------------------------------
@@ -946,13 +982,18 @@ def parser_bauen():
     lk.add_argument("--date")
 
     pd = sub.add_parser("parentsday", parents=[gemeinsam],
-                        help="Elternsprechtag (nur lesend)")
+                        help="Elternsprechtag: Termine lesen, buchen, stornieren")
     pdsub = pd.add_subparsers(dest="pd_cmd", required=True)
     for name, hilfe in (("info", "Sprechtag, Status, Buchungsfenster"),
                         ("list", "eigene Termine"),
                         ("free", "je Zeit die noch buchbaren Lehrkraefte")):
         x = pdsub.add_parser(name, parents=[gemeinsam], help=hilfe)
         x.add_argument("--id", help="Sprechtag-id, sonst der angekuendigte")
+    for name, hilfe in (("book", "Termin buchen"), ("cancel", "Termin stornieren")):
+        x = pdsub.add_parser(name, parents=[gemeinsam], help=hilfe)
+        x.add_argument("--id", help="Sprechtag-id, sonst der angekuendigte")
+        x.add_argument("--teacher", required=True, help="Kuerzel oder Teil des Namens")
+        x.add_argument("--time", required=True, help="Beginn HH:MM, z.B. 15:55")
 
     m = sub.add_parser("messages", parents=[gemeinsam],
                        help="Mitteilungs-Center")
