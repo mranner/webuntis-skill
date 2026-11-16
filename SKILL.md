@@ -328,10 +328,10 @@ Weboberfläche. Verifiziert 16.11.2026: `list` deckt sich mit dem PDF-Export,
 beide an den zurückgegebenen `timeSlots`, ob sich die Buchung geändert hat. Eine
 zweite Buchung bei derselben Lehrkraft **verschiebt nicht**, sie kommt dazu --
 verschieben heißt: neu buchen, alten Termin stornieren. `--teacher` trifft das
-Kürzel exakt oder einen Namensteil; „KNECHTL" ist mehrdeutig (KN, KNR) und
-bricht mit beiden Kandidaten ab. `-1` und `[1]` schickt die Weboberfläche so
-mit, ihre Bedeutung ist offen. Verifiziert 16.11.2026: HOL 15:55 gebucht und
-storniert, die übrigen Termine unverändert.
+Kürzel exakt oder einen Namensteil; ein Nachname, den zwei Lehrkräfte tragen,
+ist mehrdeutig und bricht mit beiden Kandidaten ab. `-1` und `[1]` schickt die
+Weboberfläche so mit, ihre Bedeutung ist offen. Verifiziert 16.11.2026: ein
+freier Termin gebucht und storniert, die übrigen Termine unverändert.
 
 ### Neues Stundenplan-API -- geprüft, nicht übernommen
 
