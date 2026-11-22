@@ -11,6 +11,7 @@ import argparse
 import getpass
 import http.cookiejar
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -116,7 +117,8 @@ class Client:
 
     # -- HTTP ---------------------------------------------------------------
 
-    def _roh(self, methode, pfad, daten=None, headers=None, content_type=None):
+    def _roh(self, methode, pfad, daten=None, headers=None, content_type=None,
+             anhaenge=()):
         url = pfad if pfad.startswith("http") else self.base + pfad
         kopf = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         if headers:
@@ -127,7 +129,7 @@ class Client:
                 koerper = urllib.parse.urlencode(daten).encode()
                 kopf["Content-Type"] = "application/x-www-form-urlencoded"
             elif content_type == "multipart":
-                koerper, grenze = multipart_bauen(daten)
+                koerper, grenze = multipart_bauen(daten, anhaenge)
                 kopf["Content-Type"] = f"multipart/form-data; boundary={grenze}"
             else:
                 koerper = json.dumps(daten).encode()
@@ -224,29 +226,35 @@ class Client:
         status, text = self._roh("POST", pfad, daten=daten, headers=kopf)
         return status, text
 
-    def sende_multipart(self, pfad, daten):
+    def sende_multipart(self, pfad, daten, anhaenge=()):
         kopf = {"Authorization": "Bearer " + self.token()}
         status, text = self._roh("POST", pfad, daten=daten, headers=kopf,
-                                 content_type="multipart")
+                                 content_type="multipart", anhaenge=anhaenge)
         if status == 401:
             self._token = None
             kopf = {"Authorization": "Bearer " + self.token()}
             status, text = self._roh("POST", pfad, daten=daten, headers=kopf,
-                                     content_type="multipart")
+                                     content_type="multipart", anhaenge=anhaenge)
         return status, text
 
 
-def multipart_bauen(daten):
-    """Ein Part `request` als JSON-Blob -- so schickt es die Weboberflaeche."""
+def multipart_bauen(daten, anhaenge=()):
+    """Part `request` als JSON-Blob, je Anhang ein Part `attachments` -- wie die Weboberflaeche."""
     grenze = "----WebUntisSkill" + uuid.uuid4().hex
     koerper = (
         f"--{grenze}\r\n"
         'Content-Disposition: form-data; name="request"; filename="blob"\r\n'
         "Content-Type: application/json\r\n\r\n"
         + json.dumps(daten, ensure_ascii=False)
-        + f"\r\n--{grenze}--\r\n"
-    )
-    return koerper.encode("utf-8"), grenze
+    ).encode("utf-8")
+    for name, typ, inhalt in anhaenge:
+        koerper += (
+            f"\r\n--{grenze}\r\n"
+            f'Content-Disposition: form-data; name="attachments"; filename="{name}"\r\n'
+            f"Content-Type: {typ}\r\n\r\n"
+        ).encode("utf-8") + inhalt
+    koerper += f"\r\n--{grenze}--\r\n".encode("utf-8")
+    return koerper, grenze
 
 
 def fehlertext(status, text, zweck):
@@ -784,11 +792,22 @@ def cmd_send(args, client):
         "oneDriveAttachments": [],
         "forbidReply": False,
     }
+    if len(args.attach) > 5:
+        raise Fehler("Hoechstens 5 Anhaenge.")
+    anhaenge = []
+    for pfad in args.attach:
+        if os.path.getsize(pfad) > 7 * 1024 * 1024:
+            raise Fehler(f"{pfad}: groesser als 7 MB.")
+        typ = mimetypes.guess_type(pfad)[0] or "application/octet-stream"
+        with open(pfad, "rb") as f:
+            anhaenge.append((os.path.basename(pfad), typ, f.read()))
     if args.dry_run:
         print(json.dumps(nutzlast, ensure_ascii=False, indent=2))
+        for name, typ, inhalt in anhaenge:
+            print(f"Anhang: {name} ({typ}, {len(inhalt)} Bytes)")
         return
     status, text = client.sende_multipart(
-        "/api/rest/view/v2/messages/users", nutzlast)
+        "/api/rest/view/v2/messages/users", nutzlast, anhaenge)
     if status not in (200, 201):
         raise Fehler(fehlertext(status, text, "Senden"))
     print(f"Gesendet. Antwort: {text[:300]}")
@@ -1010,6 +1029,8 @@ def parser_bauen():
     ms.add_argument("--to", nargs="+", required=True, help="userId(s)")
     ms.add_argument("--subject", required=True)
     ms.add_argument("--body", required=True, help="Text oder '-' fuer stdin")
+    ms.add_argument("--attach", action="append", default=[], metavar="PFAD",
+                    help="Datei anhaengen, mehrfach moeglich (max. 5, je 7 MB)")
     ms.add_argument("--dry-run", action="store_true",
                     help="Nutzlast zeigen, nichts senden")
     return p

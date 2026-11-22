@@ -166,6 +166,9 @@ python3 "$SKILL_DIR/webuntis" messages send \
 `--body -` liest den Text von stdin (besser als lange Texte in der
 Kommandozeile). **`--dry-run` zeigt nur die Nutzlast und sendet nicht.**
 
+`--attach PFAD` hängt eine Datei an, mehrfach angeben für mehrere (max. 5,
+je 7 MB). `--dry-run` listet dann jeden Anhang mit Typ und Größe.
+
 Vor dem ersten echten Versand: `--dry-run` zeigen lassen und vom Nutzer
 bestätigen lassen. Eine gesendete Mitteilung geht an eine echte Lehrkraft
 und lässt sich nicht zurückziehen.
@@ -188,7 +191,7 @@ andere Bereiche frei:
 | Tagesnachrichten | funktioniert |
 | Mitteilungen lesen | funktioniert |
 | Mitteilungen senden | erlaubt, `recipientOptions: ["TEACHER"]`, max. 5 Anhänge a 7 MB |
-| Mitteilungen senden (Skript) | v2 seit 18.09.2026, scharf gelaufen seit November 2026, siehe unten |
+| Mitteilungen senden (Skript) | v2 seit 18.09.2026, scharf gelaufen seit November 2026, Anhänge seit 22.11.2026, siehe unten |
 | Hausaufgaben | Endpunkt antwortet, war leer |
 | Abwesenheiten | funktioniert, nur je Kind mit `studentId` (ohne: HTTP 500) |
 | Sprechstunden | funktioniert (`officehours`); Anmeldung laut Einstellungen erlaubt, im Script noch nicht |
@@ -248,6 +251,12 @@ Der Empfänger steht also in `recipientUserIds` (die `userId` aus
 `messages recipients`), ein `recipientOption` gibt es nicht mehr. Ein
 403 beim Senden ist demnach zuerst ein Verdacht gegen den Endpunkt, nicht
 gegen die Rechte der Schule.
+
+Anhänge gehen im selben Request mit: je Datei ein weiterer Part
+`attachments` mit `filename="<Originalname>"` und dem Dateityp als
+`Content-Type`, Inhalt roh. `oneDriveAttachments` bleibt `[]`. Aus einem
+HAR vom 22.11.2026 (ein PDF) nachgebaut; mehrere Anhänge als mehrere
+`attachments`-Parts sind angenommen, nicht aufgezeichnet.
 
 Login per Formular (`POST /WebUntis/j_spring_security_check`) setzt die
 Session-Cookies, die unter `~/.cache/webuntis-skill/` (Modus 600) liegen und
