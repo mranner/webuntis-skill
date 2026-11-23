@@ -76,7 +76,7 @@ Passwort auf dem Terminal abfragt.
 | `classes` | Alle Klassen der Schule mit id |
 | `timetable` | Stundenplan (`--student`, `--class`, `--date`, `--days`) |
 | `news` | Tagesnachrichten der Schule (`--date`) |
-| `homework` | Hausaufgaben (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
+| `homework` | Hausaufgaben (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind; erste Spalte ist das Abgabedatum (`dueDate`), das Aufgabedatum (`date`) nur mit `--json` |
 | `absences` | Abwesenheiten (`--student`, `--date`, `--days`); ohne `--student` alle Kinder, jede Zeile mit Kind |
 | `officehours` | Sprechstunden der Lehrkräfte (`--class`, `--teacher`, `--date`, `--weeks`); mit `--class` samt Fächern in der Klasse |
 | `teachers` | Alle Lehrkräfte einer Klasse (`--class`) oder eines Kindes (`--student`) mit Fächern und nächster Sprechstunde (`--date`) |
@@ -192,7 +192,7 @@ andere Bereiche frei:
 | Mitteilungen lesen | funktioniert |
 | Mitteilungen senden | erlaubt, `recipientOptions: ["TEACHER"]`, max. 5 Anhänge a 7 MB |
 | Mitteilungen senden (Skript) | v2 seit 18.09.2026, scharf gelaufen seit November 2026, Anhänge seit 22.11.2026, siehe unten |
-| Hausaufgaben | Endpunkt antwortet, war leer |
+| Hausaufgaben | funktioniert, liefert Daten (geprüft 23.11.2026); nur was die Lehrkraft einträgt, nicht jede trägt ein |
 | Abwesenheiten | funktioniert, nur je Kind mit `studentId` (ohne: HTTP 500) |
 | Sprechstunden | funktioniert (`officehours`); Anmeldung laut Einstellungen erlaubt, im Script noch nicht |
 | Elternsprechtag | funktioniert (`parentsday`): lesen, buchen, stornieren |
